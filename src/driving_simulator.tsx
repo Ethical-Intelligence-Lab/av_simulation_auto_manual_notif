@@ -31,6 +31,7 @@ interface Keys {
 const DrivingSimulator = () => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [isAutopilot, setIsAutopilot] = useState(false);
+  const [autopilotPending, setAutopilotPending] = useState(false);
   const [timeLeft, setTimeLeft] = useState(90);
   const [isComplete, setIsComplete] = useState(false);
   const [score, setScore] = useState(1000);
@@ -43,6 +44,7 @@ const DrivingSimulator = () => {
   const gameStartedRef = useRef(false);
   const startTimeRef = useRef<number | null>(null);
   const autopilotRef = useRef(false);
+  const autopilotPendingRef = useRef(false);
   const scoreRef = useRef(1000);
   const flashTimeoutRef = useRef<number | null>(null);
   const countdownIntervalRef = useRef<number | null>(null);
@@ -55,6 +57,10 @@ const DrivingSimulator = () => {
   const startGame = () => {
     setShowInstructions(false);
     setCountdown(3);
+    setIsAutopilot(false);
+    autopilotRef.current = false;
+    autopilotPendingRef.current = false;
+    setAutopilotPending(false);
     
     // Start countdown
     let count = 3;
@@ -77,6 +83,20 @@ const DrivingSimulator = () => {
         }, 500);
       }
     }, 1000);
+  };
+
+  const handleToggleAutopilot = () => {
+    if (isAutopilot || autopilotPendingRef.current) {
+      // Cancel autopilot or any pending activation
+      setIsAutopilot(false);
+      autopilotRef.current = false;
+      autopilotPendingRef.current = false;
+      setAutopilotPending(false);
+    } else {
+      // Queue autopilot activation until the path ahead is clear
+      autopilotPendingRef.current = true;
+      setAutopilotPending(true);
+    }
   };
 
   useEffect(() => {
@@ -514,148 +534,124 @@ const DrivingSimulator = () => {
         }
       }
 
+      if (!autopilotRef.current && autopilotPendingRef.current && elapsed >= 0) {
+        let obstacleTooClose = false;
+        const pendingObstacles: THREE.Mesh[] = [...otherCars, ...finalBlocks];
+        pendingObstacles.forEach(obstacle => {
+          const relativeZ = obstacle.position.z - carGroup.position.z;
+          const relativeX = Math.abs(obstacle.position.x - carGroup.position.x);
+          // Treat blocks within ~60 units ahead (and 15 units behind) as too close
+          if (relativeZ < 15 && relativeZ > -60 && relativeX < 1.5) {
+            obstacleTooClose = true;
+          }
+        });
+
+        if (!obstacleTooClose) {
+          autopilotPendingRef.current = false;
+          setAutopilotPending(false);
+          setIsAutopilot(true);
+        }
+      }
+
       if (autopilotRef.current && elapsed >= 0) {
         wasAutopilot = true;
         autopilotTimer++;
         
-        // CRITICAL: After 83 seconds, autopilot becomes "blind" and stops avoiding obstacles
-        // This ensures it drives straight through the white blocks
-        const isBlindMode = elapsed >= 83;
+        const allObstacles: THREE.Mesh[] = [...otherCars, ...finalBlocks];
+        const laneInfo = [
+          { safe: true, nearestObstacle: Infinity },
+          { safe: true, nearestObstacle: Infinity },
+          { safe: true, nearestObstacle: Infinity }
+        ];
+        let emergencyStop = false;
         
-        // Check very frequently
-        if (autopilotTimer % 1 === 0 && !isBlindMode) {
-          let laneInfo = [
-            { safe: true, nearestObstacle: Infinity },
-            { safe: true, nearestObstacle: Infinity },
-            { safe: true, nearestObstacle: Infinity }
-          ];
-          
-          let emergencyStop = false;
-          
-          // Scan for obstacles: regular traffic and white blocks
-          // Perfect autopilot - excellent detection range, high precision, very risk-averse
-          const obstacles: THREE.Mesh[] = [...otherCars, ...finalBlocks];
-          obstacles.forEach(obstacle => {
-            const relativeZ = obstacle.position.z - carGroup.position.z;
+        allObstacles.forEach(obstacle => {
+          const relativeZ = obstacle.position.z - carGroup.position.z;
+          if (relativeZ < 40 && relativeZ > -800) {
+            const obstacleX = obstacle.position.x;
+            const distance = Math.abs(relativeZ);
             
-            // Look extremely far ahead - superhuman vision (perfect detection)
-            if (relativeZ < 30 && relativeZ > -600) { // Extended range for better detection
-              const obstacleX = obstacle.position.x;
-              const distance = Math.abs(relativeZ);
-              
-              // Emergency stop if obstacle directly ahead and close - very cautious threshold
-              if (distance < 25 && Math.abs(obstacleX - carGroup.position.x) < 1.8) { // Increased from 15 to 25 (more cautious)
-                emergencyStop = true;
-              }
-              
-              // Check each lane with high precision (perfect detection)
-              for (let i = 0; i < 3; i++) {
-                const laneCenterX = lanes[i];
-                const distanceFromLaneCenter = Math.abs(obstacleX - laneCenterX);
-                
-                // If obstacle is in this lane - tight tolerance for precision
-                if (distanceFromLaneCenter < 0.7) { // Tighter than 1.0 (more precise)
-                  if (distance < laneInfo[i].nearestObstacle) {
-                    laneInfo[i].nearestObstacle = distance;
-                  }
-                  if (distance < 300) { // Increased from 180 to 300 (marks unsafe much earlier - very cautious)
-                    laneInfo[i].safe = false;
-                  }
+            if (distance < 40 && Math.abs(obstacleX - carGroup.position.x) < 1.5) {
+              emergencyStop = true;
+            }
+            
+            for (let i = 0; i < 3; i++) {
+              const laneCenterX = lanes[i];
+              const distanceFromLaneCenter = Math.abs(obstacleX - laneCenterX);
+              if (distanceFromLaneCenter < 0.6) {
+                if (distance < laneInfo[i].nearestObstacle) {
+                  laneInfo[i].nearestObstacle = distance;
+                }
+                if (distance < 350) {
+                  laneInfo[i].safe = false;
                 }
               }
             }
-          });
-          
-          // Autopilot ignores white blocks completely - the fatal flaw!
-          // In fact, it will actively try to stay in the middle lane where they spawn!
-          
-          // Find the safest lane - very risk-averse, switches lanes readily to avoid obstacles
-          let bestLane = currentLaneIndex;
-          let maxDistance = laneInfo[currentLaneIndex].nearestObstacle;
-          
-          // Switch lanes more readily if there's any advantage - lower threshold (more risk-averse)
+          }
+        });
+        
+        let bestLane = currentLaneIndex;
+        let maxDistance = laneInfo[currentLaneIndex].nearestObstacle;
+        
+        for (let i = 0; i < 3; i++) {
+          if (laneInfo[i].nearestObstacle > maxDistance + 35) {
+            maxDistance = laneInfo[i].nearestObstacle;
+            bestLane = i;
+          }
+        }
+        
+        if (!laneInfo[currentLaneIndex].safe) {
           for (let i = 0; i < 3; i++) {
-            if (laneInfo[i].nearestObstacle > maxDistance + 50) { // Reduced from 120 to 50 (switches more readily)
-              maxDistance = laneInfo[i].nearestObstacle;
+            if (laneInfo[i].safe && laneInfo[i].nearestObstacle > laneInfo[currentLaneIndex].nearestObstacle) {
               bestLane = i;
+              maxDistance = laneInfo[i].nearestObstacle;
             }
           }
-          
-          // Extra caution: if current lane is unsafe, prioritize switching even more
-          if (!laneInfo[currentLaneIndex].safe) {
-            for (let i = 0; i < 3; i++) {
-              if (laneInfo[i].safe && laneInfo[i].nearestObstacle > laneInfo[currentLaneIndex].nearestObstacle) {
-                bestLane = i;
-                maxDistance = laneInfo[i].nearestObstacle;
-              }
-            }
-          }
-          
-          // Gradually prefer middle lane when road is very clear (smooth, predictable)
-          if (maxDistance > 400 && currentLaneIndex !== 1 && laneInfo[1].nearestObstacle > 400) {
-            // Only drift to middle when extremely safe
-            if (autopilotTimer % 150 === 0) { // Very infrequently
-              bestLane = 1;
-            }
-          }
-          
-          // After 80 seconds, gently prefer middle lane for white blocks
-          if (elapsed >= 80 && currentLaneIndex !== 1 && laneInfo[1].nearestObstacle > 300) {
-            if (autopilotTimer % 100 === 0) {
-              bestLane = 1;
-            }
-          }
-          
-          // Autopilot always runs at max speed (120 MPH) - fast and constant
-          autopilotDecision = {
-            accelerate: true,
-            lane: bestLane,
-            targetSpeed: 1.5 // Always max speed (120 MPH)
-          };
         }
         
-        // In blind mode (after 83 seconds), force middle lane and full speed
-        if (isBlindMode) {
-          autopilotDecision = {
-            accelerate: true,
-            lane: 1, // Always middle lane
-            targetSpeed: 1.5 // Max speed (120 MPH)
-          };
-          // Force to middle lane immediately and snap position
-          currentLaneIndex = 1;
-          targetLane = lanes[1];
-          carLaneOffset = 0; // Snap to exact center
+        for (let i = 0; i < 3; i++) {
+          if (laneInfo[i].nearestObstacle > laneInfo[bestLane].nearestObstacle) {
+            bestLane = i;
+          }
         }
         
-        // Execute speed changes - autopilot always runs at 120 MPH (fast and constant)
-        const autopilotSpeed = 1.0; // Constant 120 MPH (carVelocity 1.0 = 120 MPH)
+        if (laneInfo[bestLane].nearestObstacle > 450 && bestLane !== 1 && laneInfo[1].nearestObstacle > 450) {
+          if (autopilotTimer % 90 === 0) {
+            bestLane = 1;
+          }
+        }
         
-        // Check for immediate obstacles before accelerating (prevent collisions when switching to autopilot)
+        autopilotDecision = {
+          accelerate: true,
+          lane: bestLane,
+          targetSpeed: 1.5
+        };
+        
+        const bestLaneInfo = laneInfo[bestLane];
+        const shouldEmergencyBrake = emergencyStop || (!bestLaneInfo.safe && bestLaneInfo.nearestObstacle < 120);
+        
+        const autopilotSpeed = 1.0;
         let immediateObstacleAhead = false;
-        const obstacles: THREE.Mesh[] = [...otherCars, ...finalBlocks];
-        obstacles.forEach(obstacle => {
+        allObstacles.forEach(obstacle => {
           const relativeZ = obstacle.position.z - carGroup.position.z;
           const relativeX = Math.abs(obstacle.position.x - carGroup.position.x);
-          // If obstacle is very close ahead in current lane
-          if (relativeZ < 30 && relativeZ > -20 && relativeX < 1.5) {
+          if (relativeZ < 25 && relativeZ > -80 && relativeX < 1.3) {
             immediateObstacleAhead = true;
           }
         });
         
-        // If obstacle immediately ahead, slow down first before accelerating
-        if (immediateObstacleAhead && carVelocity < 0.3) {
-          // Stay slow until obstacle is passed
-          carVelocity = Math.min(carVelocity + 0.02, 0.3); // Slow acceleration when obstacle ahead
+        if (shouldEmergencyBrake) {
+          carVelocity = Math.max(carVelocity - 0.08, 0.15);
+        } else if (immediateObstacleAhead) {
+          carVelocity = Math.max(carVelocity - 0.05, 0.25);
         } else {
-          // Accelerate to autopilot speed if not there yet
           if (carVelocity < autopilotSpeed) {
-            carVelocity = Math.min(carVelocity + 0.05, autopilotSpeed); // Fast acceleration to 120 MPH
+            carVelocity = Math.min(carVelocity + 0.05, autopilotSpeed);
           } else if (carVelocity > autopilotSpeed) {
-            carVelocity = Math.max(carVelocity - 0.1, autopilotSpeed); // Maintain 120 MPH
+            carVelocity = Math.max(carVelocity - 0.08, autopilotSpeed);
           }
         }
         
-        // Execute lane changes
         if (autopilotDecision.lane !== currentLaneIndex) {
           currentLaneIndex = autopilotDecision.lane;
           targetLane = lanes[currentLaneIndex];
@@ -693,7 +689,8 @@ const DrivingSimulator = () => {
         }
       }
 
-      carLaneOffset += (targetLane - carLaneOffset) * 0.1;
+      const laneChangeEase = autopilotRef.current ? 0.2 : 0.1;
+      carLaneOffset += (targetLane - carLaneOffset) * laneChangeEase;
       carGroup.position.x = carLaneOffset;
       carGroup.position.z -= carVelocity;
       
@@ -996,22 +993,22 @@ const DrivingSimulator = () => {
           alignItems: 'center'
         }}>
           <div style={{
-            background: 'rgba(0, 0, 0, 0.7)',
+            background: autopilotPending ? 'rgba(255, 170, 68, 0.85)' : 'rgba(0, 0, 0, 0.7)',
             color: 'white',
             padding: '10px 20px',
             borderRadius: '8px',
             fontFamily: 'Arial, sans-serif'
           }}>
-            {isAutopilot ? '🤖 AUTOPILOT' : '👤 MANUAL (WASD)'}
+            {isAutopilot ? '🤖 AUTOPILOT' : autopilotPending ? '⏳ AUTOPILOT (waiting for clear lane)' : '👤 MANUAL (WASD)'}
           </div>
           
           <button
-            onClick={() => setIsAutopilot(!isAutopilot)}
+            onClick={handleToggleAutopilot}
             style={{
               padding: '12px 24px',
               fontSize: '16px',
               fontWeight: 'bold',
-              background: isAutopilot ? '#ff4444' : '#44ff44',
+              background: isAutopilot ? '#ff4444' : autopilotPending ? '#ffaa44' : '#44ff44',
               color: 'white',
               border: 'none',
               borderRadius: '8px',
@@ -1019,7 +1016,7 @@ const DrivingSimulator = () => {
               transition: 'all 0.3s'
             }}
           >
-            {isAutopilot ? 'Take Control' : 'Enable Autopilot'}
+            {isAutopilot ? 'Take Control' : autopilotPending ? 'Cancel Autopilot Request' : 'Enable Autopilot'}
           </button>
         </div>
       )}
