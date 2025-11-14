@@ -1253,7 +1253,7 @@ const DrivingSimulator = () => {
             letterSpacing: '0.8px'
           }}>
             {isAutopilot
-              ? `🤖 ${labelCondition.toUpperCase()} ENGAGED`
+              ? `${labelCondition.toUpperCase()} ENGAGED`
               : autopilotPending
               ? `⏳ ${labelCondition.toUpperCase()} WAITING`
               : '👤 MANUAL CONTROL'}
