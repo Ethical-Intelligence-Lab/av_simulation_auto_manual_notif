@@ -1903,7 +1903,8 @@ const DrivingSimulator = () => {
               left: '50%',
               transform: 'translate(-50%, -50%)',
               width: 'min(600px, 90vw)',
-              maxHeight: '80vh',
+              maxHeight: '90vh',
+              minHeight: '400px',
               background: 'rgba(0, 0, 0, 0.95)',
               backdropFilter: 'blur(10px)',
               borderRadius: '20px',
@@ -1914,7 +1915,7 @@ const DrivingSimulator = () => {
               animation: 'slideIn 0.3s ease-out',
               display: 'flex',
               flexDirection: 'column',
-              overflow: 'hidden',
+              overflow: 'visible',
               boxSizing: 'border-box'
             }}
             onClick={(e) => {
@@ -1978,10 +1979,8 @@ const DrivingSimulator = () => {
               fontSize: 'min(20px, 2.5vw)',
               color: 'rgba(255, 255, 255, 0.9)',
               lineHeight: '1.6',
-              overflowY: 'auto',
-              flex: 1,
-              minHeight: 0,
-              paddingRight: '8px'
+              overflow: 'visible',
+              wordWrap: 'break-word'
             }}>
               {selectedNotification.content}
             </div>
